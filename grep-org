@@ -1,0 +1,80 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Known (or heavily suspected) bugs:
+# * API Rate limits are not handled
+# * It is not possible to provide a filename pattern
+
+require 'github_api'
+require 'json'
+
+def exit_with(message)
+  puts message
+  exit 1
+end
+
+def read_json(path)
+  begin
+    contents = JSON.parse(IO.read(path))
+  rescue Errno::ENOENT
+    exit_with "#{path} not found"
+  rescue JSON::ParserError
+    exit_with "#{path} does not contain valid JSON"
+  end
+
+  contents
+end
+
+def auth_string
+  path = File.join ENV['HOME'], '.github_credentials_repo.json'
+
+  creds = read_json path
+
+  if creds.key?('user') && creds.key?('token')
+    "#{creds['user']}:#{creds['token']}"
+  else
+    exit_with "#{creds_file} must have 'user' and 'token' fields"
+  end
+end
+
+def github
+  @github ||= Github.new auto_pagination: true, basic_auth: auth_string
+end
+
+def search_repo(org, repo, path, pattern)
+  begin
+    contents64 = github.repos.contents.get(user: org, repo: repo, path: path)
+  rescue Github::Error::NotFound
+    return
+  end
+
+  contents = Base64.decode64(contents64.content)
+
+  contents.scan(/.*#{pattern}.*/) do |match|
+    puts "#{repo}: #{match}"
+  end
+end
+
+def user?(user_or_org)
+  github.users.get(user: user_or_org).type == 'User'
+rescue Github::Error::NotFound
+  exit_with "GitHub user '#{user_or_org}' not found"
+end
+
+user_or_org = ARGV[0]
+path        = ARGV[1]
+pattern     = ARGV[2]
+
+unless user_or_org && path && pattern
+  exit_with "Usage: #{$PROGRAM_NAME} <github-user-or-organization> <file path> <regex>"
+end
+
+repos = if user?(user_or_org)
+          github.repos.list user: user_or_org
+        else
+          github.repos.list org: user_or_org, type: :all
+        end
+
+repos.each do |repo|
+  search_repo(user_or_org, repo.name, path, pattern)
+end
